@@ -1,6 +1,8 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import signal
+from pathlib import Path
+import pandas as pd
 
 titleFont = {'weight':'bold', 'color':'orangered', 'size':20, 'name':'Comic Sans MS'}
 normalFont = {'color':'maroon', 'size':16}
@@ -143,5 +145,41 @@ def features(fs, raw, windowSize, stride, alpha):
     features = merge(features2, features1)
     return features
 
+def createData(windowSize, stride, alpha):
+    xAll = []
+    yAll = []
+    metaAll = []
+    fs = 512 # Already given
+
+    datasetDir = Path("./Synapse_Dataset")
+
+    for sessionDir in datasetDir.iterdir():
+        if not sessionDir.is_dir():
+            continue
+
+        for subjectDir in sessionDir.iterdir():
+            for csvFile in subjectDir.glob("*.csv"):
+
+                raw = pd.read_csv(csvFile).values
+                xCsv = features(fs, raw, windowSize, stride, alpha)
+
+                gesture_id = int(csvFile.stem.split("_")[0].replace("gesture", ""))
+                trial_no = int(csvFile.stem.split("_")[1].replace("trial", ""))
+                session_no = int(subjectDir.name.split("_")[0].replace("session", ""))
+                subject_no = int(subjectDir.name.split("_")[2])
+
+                yCsv = np.full(xCsv.shape[0], gesture_id)
+
+                metaCsv = [{"subject": subject_no, "session": session_no, "trial": trial_no} for _ in range(xCsv.shape[0])]
+
+                xAll.append(xCsv)
+                yAll.append(yCsv)
+                metaAll.extend(metaCsv)
+    
+    x = np.vstack(xAll)
+    y = np.concatenate(yAll)
+    meta = metaAll
+
+    return x, y, meta
 
 
