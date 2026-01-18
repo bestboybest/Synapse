@@ -3,6 +3,9 @@ import numpy as np
 from scipy import signal
 from pathlib import Path
 import pandas as pd
+from sklearn.model_selection import GroupKFold
+from sklearn.metrics import f1_score
+from collections import Counter
 
 titleFont = {'weight':'bold', 'color':'orangered', 'size':20, 'name':'Comic Sans MS'}
 normalFont = {'color':'maroon', 'size':16}
@@ -182,4 +185,6 @@ def createData(windowSize, stride, alpha):
 
     return x, y, meta
 
+def majorityVote(labels):
+    return Counter(labels).most_common(1)[0][0]
 
