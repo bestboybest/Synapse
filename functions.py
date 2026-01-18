@@ -1,11 +1,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import signal
+from scipy.signal import welch
 from pathlib import Path
 import pandas as pd
 from sklearn.model_selection import GroupKFold
 from sklearn.metrics import f1_score
-from collections import Counter
 
 titleFont = {'weight':'bold', 'color':'orangered', 'size':20, 'name':'Comic Sans MS'}
 normalFont = {'color':'maroon', 'size':16}
@@ -46,12 +46,6 @@ def filtering(fs, x):
 
     return filtered
 
-def rectify(x):
-    #Take absolute value to recitfy the signal
-    x = np.array(x)
-    rectified = np.abs(x)
-    return rectified
-
 def normalize(x):
     #We will do RMS normalization
     #RMS represents the muscle activation strength, which will differ from subject to subject
@@ -79,112 +73,162 @@ def windowing(x, windowSize, stride):
         start += stride
     return np.array(windows)
 
-def featureEngineering(windows):
-    Totalfeatures = []
-    for window in windows:
-        features = []
-        for i in range(window.shape[1]):
-            #Calculating RMS of window (root mean square) (represents signal energy) 
-            rms = np.sqrt(np.mean((window[:, i]) ** 2))
-            features.append(rms)
-
-            #Calculating MAV of window (mean absolute value) (represents average activation)
-            mav = np.mean(window[:, i])
-            features.append(mav)
-
-            #Calculating WL of window (window length) (represents signal complexity)
-            wl = np.sum(np.abs(np.diff(window[:, i])))
-            features.append(wl)
-
-        Totalfeatures.append(features)
-    return np.array(Totalfeatures, dtype=np.float32)
-
-def zc(windows, alpha):
-    Totalfeatures = []
-    for window in windows:
-        features = []
-        for i in range(window.shape[1]):
-            #Calculating RMS of window (root mean square) (represents signal energy) (RMS same regardless of rectification)
-            rms = np.sqrt(np.mean((window[:, i]) ** 2))
-
-            #Need a threshold to get rid of noisy false positive zero crossings
-            threshold = alpha * rms
-            #Let's calculate zero crossings now
-            zcCount = 0
-            x = window[:, i]
-            for j in range(len(x) - 1):
-                if ((x[j] > 0 and x[j+1] < 0) or (x[j] < 0 and x[j+1] > 0)):
-                    if abs(x[j] - x[j+1]) >= threshold:
-                        zcCount += 1
-            features.append(zcCount)
-        Totalfeatures.append(features)
-    return np.array(Totalfeatures, dtype = np.float32)
-
-def merge(features1, features2):
-    merged = []
-
-    for i in range(features1.shape[0]):
+def timeFeatures(windows_norm):
+    X = []
+    for w in windows_norm:
         row = []
-        for ch in range(8):
-            row.append(features1[i, 3*ch])     # RMS
-            row.append(features1[i, 3*ch + 1]) # MAV
-            row.append(features1[i, 3*ch+2])   # WL
-            row.append(features2[i, ch])       # ZC
-        merged.append(row)
-    return np.array(merged, dtype=np.float32)
+        for ch in range(w.shape[1]):
+            sig = w[:, ch]
+            rms = np.sqrt(np.mean(sig**2))
+            mav = np.mean(np.abs(sig))
+            wl  = np.sum(np.abs(np.diff(sig)))
+            ssc = np.sum(
+                (sig[1:-1] - sig[:-2]) *
+                (sig[1:-1] - sig[2:]) > 0
+            )
+            row.extend([rms, mav, wl, ssc])
+        X.append(row)
+    return np.array(X, dtype=np.float32)
 
-def features(fs, raw, windowSize, stride, alpha):
-    filtered = filtering(fs, raw)
+def freqFeatures(windows_raw, fs=512):
+    X = []
+    for w in windows_raw:
+        row = []
+        for ch in range(w.shape[1]):
+            sig = w[:, ch]
+            rms = np.sqrt(np.mean(sig**2))
+            zc = np.sum(np.diff(np.sign(sig)) != 0)
 
-    zcCopy = filtered.copy()
-    zcWindows = windowing(zcCopy, windowSize, stride)
-    features1 = zc(zcWindows, alpha)
+            f, pxx = welch(sig, fs=fs, nperseg=len(sig))
+            mnf = np.sum(f * pxx) / np.sum(pxx)
+            cdf = np.cumsum(pxx)
+            mdf = f[np.where(cdf >= np.sum(pxx)/2)[0][0]]
 
-    rectified = rectify(filtered)
-    normalized = normalize(rectified)
-    windows = windowing(normalized, windowSize, stride)
-    features2 = featureEngineering(windows)
+            row.extend([rms, zc, mnf, mdf])
+        X.append(row)
+    return np.array(X, dtype=np.float32)
 
-    features = merge(features2, features1)
-    return features
+def interChannelFeatures(windows_norm):
+    X = []
+    for w in windows_norm:
+        rmsVals = np.sqrt(np.mean(w**2, axis=0))
+        rmsVals = np.array(rmsVals) + 1e-8
 
-def createData(windowSize, stride, alpha):
-    xAll = []
-    yAll = []
-    metaAll = []
-    fs = 512 # Already given
+        q75, q25 = np.percentile(rmsVals, [75 ,25])
+        iqr_spread = (q75 - q25) / np.median(rmsVals)
 
-    datasetDir = Path("./Synapse_Dataset")
+        dominance = np.percentile(rmsVals, 90) / np.median(rmsVals)
 
-    for sessionDir in datasetDir.iterdir():
-        if not sessionDir.is_dir():
+        p = rmsVals / (np.sum(rmsVals) + 1e-8)
+        entropy = -np.sum(p * np.log(p + 1e-8))
+
+        corr_vals = []
+        for i in range(w.shape[1]):
+            for j in range(i+1, w.shape[1]):
+                c = np.corrcoef(w[:, i], w[:, j])[0, 1]
+                if not np.isnan(c):
+                    corr_vals.append(c)
+
+        corr_mean = np.mean(corr_vals)
+        corr_std  = np.std(corr_vals)
+        corr_max  = np.max(np.abs(corr_vals))
+
+        X.append([iqr_spread, dominance, entropy, corr_mean, corr_std, corr_max])
+    return np.array(X, dtype=np.float32)
+
+def hjorthFeatures(windows_norm):
+    #Calculating hjorth mobility and complexity
+    X = []
+
+    for w in windows_norm:
+        row = []
+        for ch in range(w.shape[1]):
+            sig = w[:, ch]
+
+            #First and second derivatives
+            d1 = np.diff(sig)
+            d2 = np.diff(d1)
+
+            var_sig = np.var(sig)
+            var_d1  = np.var(d1)
+            var_d2  = np.var(d2)
+
+            if var_sig < 1e-8 or var_d1 < 1e-8:
+                mobility = 0.0
+                complexity = 0.0
+            else:
+                mobility = np.sqrt(var_d1 / var_sig)
+                complexity = np.sqrt(var_d2 / var_d1) / mobility
+
+            row.extend([mobility, complexity])
+
+        X.append(row)
+
+    return np.array(X, dtype=np.float32)
+
+def rms_sequence(windows_norm):
+    return np.sqrt(np.mean(windows_norm**2, axis=(1, 2)))
+
+def temporalFeatures(windows_norm):
+    rms_seq = rms_sequence(windows_norm)
+
+    t = np.arange(len(rms_seq))
+    slope = np.polyfit(t, rms_seq, 1)[0]
+
+    volatility = np.std(rms_seq) / (np.mean(rms_seq) + 1e-8)
+    delta = rms_seq[-1] - rms_seq[0]
+
+    return np.array([slope, volatility, delta], dtype=np.float32)
+
+def createData(window_size, stride, fs=512, out_path="./data/window_cache.npz"):
+    windows_raw_all = []
+    windows_norm_all = []
+    y_all = []
+    meta_all = []
+    groups_all = []
+
+    dataset_dir = Path("./Synapse_Dataset")
+
+    for session_dir in dataset_dir.iterdir():
+        if not session_dir.is_dir():
             continue
 
-        for subjectDir in sessionDir.iterdir():
-            for csvFile in subjectDir.glob("*.csv"):
+        for subject_dir in session_dir.iterdir():
+            subject_id = int(subject_dir.name.split("_")[2])
 
-                raw = pd.read_csv(csvFile).values
-                xCsv = features(fs, raw, windowSize, stride, alpha)
+            for csv_file in subject_dir.glob("*.csv"):
+                raw = pd.read_csv(csv_file).values
 
-                gesture_id = int(csvFile.stem.split("_")[0].replace("gesture", ""))
-                trial_no = int(csvFile.stem.split("_")[1].replace("trial", ""))
-                session_no = int(subjectDir.name.split("_")[0].replace("session", ""))
-                subject_no = int(subjectDir.name.split("_")[2])
+                filtered = filtering(fs, raw)
 
-                yCsv = np.full(xCsv.shape[0], gesture_id)
+                win_raw = windowing(filtered, window_size, stride)
 
-                metaCsv = [{"subject": subject_no, "session": session_no, "trial": trial_no} for _ in range(xCsv.shape[0])]
+                #Rectified + normalized
+                win_norm = np.array([normalize(np.abs(w)) for w in win_raw])
 
-                xAll.append(xCsv)
-                yAll.append(yCsv)
-                metaAll.extend(metaCsv)
-    
-    x = np.vstack(xAll)
-    y = np.concatenate(yAll)
-    meta = metaAll
+                gesture = int(csv_file.stem.split("_")[0].replace("gesture", ""))
+                trial = int(csv_file.stem.split("_")[1].replace("trial", ""))
 
-    return x, y, meta
+                n = win_raw.shape[0]
 
-def majorityVote(labels):
-    return Counter(labels).most_common(1)[0][0]
+                windows_raw_all.append(win_raw)
+                windows_norm_all.append(win_norm)
+
+                y_all.extend([gesture]*n)
+                groups_all.extend([subject_id]*n)
+
+                meta_all.extend([
+                    {
+                        "subject": subject_id,
+                        "session": int(session_dir.name.replace("Session", "")),
+                        "trial": trial
+                    }
+                ] * n)
+
+    np.savez(out_path, windows_raw=np.vstack(windows_raw_all), windows_norm=np.vstack(windows_norm_all), y=np.array(y_all), meta=np.array(meta_all, dtype=object), groups=np.array(groups_all))
+
+#For soft voting
+def soft_vote(x):
+    return x.value_counts().idxmax()
+
 
