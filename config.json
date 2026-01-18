@@ -1,0 +1,19 @@
+{
+  "fs": 512,
+  "window_size": 102,
+  "stride": 51,
+  "feature_order": [
+    "time",
+    "freq",
+    "inter",
+    "hjorth",
+    "temporal"
+  ],
+  "gesture_map": {
+    "0": "Open Hand",
+    "1": "Closed Hand",
+    "2": "Lateral Pinch",
+    "3": "Signalling Sign",
+    "4": "Rock Sign"
+  }
+}
